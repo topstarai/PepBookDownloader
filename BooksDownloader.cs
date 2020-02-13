@@ -14,8 +14,8 @@ namespace ConsoleApp1
         private static readonly BooksDownloader booksDownloader = new BooksDownloader();
         private static async Task RunDownload(string directory, string category, List<string> urls)
         {
-            Console.WriteLine($"正在下载“{category}”中的{urls.Count}本书籍，请等待...");
-            await booksDownloader.DownloadBooksAsync(directory, category, urls,(title,count)=> {
+            Console.WriteLine($"正在下载“{category}”中的{urls.Count}个学科的书籍，请等待...");
+            await booksDownloader.DownloadMultipleSubjectBooksAsync(directory, category, urls,(title,count)=> {
                 Console.WriteLine($"{title},共有{count}个文件下载完成");
             });
         }
@@ -27,8 +27,8 @@ namespace ConsoleApp1
                 throw new DirectoryNotFoundException();
             }
 
-            //获取书籍地址
-            var bookUrls = await booksDownloader.GetBookUrlsAsync();
+            //获取每个大类的下的学科页面的地址
+            var bookUrls = await booksDownloader.GetSubjectPageUrlsAsync();
 
             Console.WriteLine("请输入下列编号，开始下载指定分类书籍。");
             Console.WriteLine("0 : 所有书籍");
@@ -80,24 +80,25 @@ namespace ConsoleApp1
                 return rBuilder.ToString();
             }
 
-            //下载指定路径所有书籍
-            public async Task DownloadBooksAsync(string directory, string subDirectory, List<string> urls,Action<string,string> callback)
+            //下载多个指定科目的下所有书籍
+            public async Task DownloadMultipleSubjectBooksAsync(string directory, string category, List<string> subjectUrls, Action<string,string> callback)
             {
-                var dir = Path.Combine(directory, $@"{subDirectory}");
+                var dir = Path.Combine(directory, $@"{category}");
                 dir = FixPath(dir);
                 if (!Directory.Exists(dir))
                 {
                     Directory.CreateDirectory(dir);
                 }
 
-                foreach (var url in urls)
+                foreach (var url in subjectUrls)
                 {
-                    await DownloadSubjectBooksAsync(dir, url,callback);
+                    var subjectBooks = await GetSubjectBooksAsync(url);
+                    await DownloadBooksAsync(dir,url,subjectBooks, callback);
                 }
             }
 
-            //获取各学科书籍各页面地址
-            public async Task<Dictionary<string, List<string>>> GetBookUrlsAsync()
+            //获取各学科各页面地址
+            public async Task<Dictionary<string, List<string>>> GetSubjectPageUrlsAsync()
             {
                 var url = BASE_URL;
                 Dictionary<string, List<string>> bookUrls = new Dictionary<string, List<string>>();
@@ -148,8 +149,8 @@ namespace ConsoleApp1
                 return bookUrls;
             }
 
-            //下载学科页面中的书籍
-            private async Task DownloadSubjectBooksAsync(string dir, string url,Action<string,string> callback)
+            //获取各学科页面中的电子书地址
+            private async Task<(string Subject, List<(string BookName, string BookUrl)> Books)> GetSubjectBooksAsync(string url)
             {
                 const string contentRootXpath = "//*[@id=\"container\"]/div[@class=\"con_list_jcdzs2020\"]";
 
@@ -165,48 +166,59 @@ namespace ConsoleApp1
 
                 //Get the subject.获取学科名称
                 HtmlNode titleEle = rootNode.SelectSingleNode(".//div[@class=\"con_title_jcdzs2020\"]");
-                string title = string.Concat(titleEle?.InnerText.Where(c => !char.IsWhiteSpace(c)));
+                string subject = string.Concat(titleEle?.InnerText.Where(c => !char.IsWhiteSpace(c)));
 
                 //Get all books of the subject. 
                 //获取学科下所有书列表并开始下载
                 HtmlNodeCollection bookNodes = rootNode.SelectNodes(".//li");
-                if (bookNodes != null)
+                List<(string BookName, string BookUrl)> books = new List<(string BookName, string BookUrl)>();
+                if (bookNodes != null && bookNodes.Count>0)
                 {
                     string bookName = null;
                     string bookUrl = null;
-                    List<Task> downloadTasks = new List<Task>();
-                    int count = 0;
 
-                    //Create the subdirectory under the specified directory.
-                    //创建子目录
-                    dir = Path.Combine(dir, title);
-                    dir = FixPath(dir);
-                    if (!Directory.Exists(dir))
-                    {
-                        Directory.CreateDirectory(dir);
-                    }
-
-                    //Get the book's info and download them
-                    //获取书的信息并下载
                     foreach (HtmlNode liItem in bookNodes)
                     {
                         bookName = FixFileName(string.Concat(liItem.ChildNodes["h6"].InnerText.Where(c => !char.IsWhiteSpace(c))));//get book's name
                         bookUrl = liItem.ChildNodes["div"].ChildNodes[3].Attributes["href"].Value;//get the url of ebook
 
-                        WebClient wc = new WebClient();
-                        Uri.TryCreate(url + bookUrl.Substring(2), UriKind.Absolute, out Uri bookUri);
-                        var path = Path.Combine(dir, $@"{bookName}.pdf");
-                        var fi = new FileInfo(path);
-                        if (!fi.Exists || fi.Length == 0)
-                        {
-                            var task = wc.DownloadFileTaskAsync(bookUri, path);
-                            downloadTasks.Add(task);
-                            count++;
-                        }
+                        books.Add((bookName, bookUrl));
                     }
-
-                    await Task.WhenAll(downloadTasks).ContinueWith((task) => { callback(title ?? string.Empty, count.ToString()); });
                 }
+                return (subject,books);
+            }
+
+            //下载单个科目下的所有书籍
+            private async Task DownloadBooksAsync(string dir, string baseUrl, (string Subject, List<(string BookName, string BookUrl)> Books) books,Action<string, string> callback)
+            {
+                //Create the subdirectory under the specified directory.
+                //创建子目录
+                dir = Path.Combine(dir, books.Subject);
+                dir = FixPath(dir);
+                if (!Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                //构建下载任务列表
+                List<Task> downloadTasks = new List<Task>();
+                int count = 0;
+                foreach (var book in books.Books)
+                {
+                    WebClient wc = new WebClient();
+                    Uri.TryCreate(baseUrl + book.BookUrl[2..], UriKind.Absolute, out Uri bookUri);
+                    var path = Path.Combine(dir, @$"{book.BookName}.pdf");
+                    var fi = new FileInfo(path);
+                    if (!fi.Exists || fi.Length == 0)
+                    {
+                        var task = wc.DownloadFileTaskAsync(bookUri, path);
+                        downloadTasks.Add(task);
+                        count++;
+                    }
+                }
+
+                //等待所有下载任务执行完后，执行回调函数
+                await Task.WhenAll(downloadTasks).ContinueWith((task) => { callback(books.Subject ?? string.Empty, count.ToString()); });
             }
         }
     }
